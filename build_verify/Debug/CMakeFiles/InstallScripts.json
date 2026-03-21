@@ -1,0 +1,8 @@
+{
+	"InstallScripts" : 
+	[
+		"C:/Users/JanRybarz/Desktop/hackaton/simplerangingvsc/simplerangingvsc/build_verify/Debug/cmake_install.cmake",
+		"C:/Users/JanRybarz/Desktop/hackaton/simplerangingvsc/simplerangingvsc/build_verify/Debug/cmake/stm32cubemx/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

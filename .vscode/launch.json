@@ -1,0 +1,21 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "STM32Cube: Launch ST-Link GDB Server",
+      "type": "stlinkgdbtarget",
+      "request": "launch",
+      "origin": "snippet",
+      "deviceName": "STM32L476RG",
+      "cwd": "${workspaceFolder}",
+      "preBuild": "${command:st-stm32-ide-debug-launch.build}",
+      "serverInterface": "SWD",
+      "runEntry": "main",
+      "imagesAndSymbols": [
+        {
+          "imageFileName": "${command:st-stm32-ide-debug-launch.get-projects-binary-from-context1}"
+        }
+      ]
+    }
+  ]
+}
