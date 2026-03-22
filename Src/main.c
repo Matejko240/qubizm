@@ -62,76 +62,6 @@ static void MX_TIM3_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-typedef enum
-{
-    TOF_QUADRANT_TOP_LEFT = 0U,
-    TOF_QUADRANT_TOP_RIGHT = 1U,
-    TOF_QUADRANT_BOTTOM_LEFT = 2U,
-    TOF_QUADRANT_BOTTOM_RIGHT = 3U
-} ToF_Quadrant_t;
-
-static uint8_t ToF_QuadrantToPos8(uint8_t quadrant)
-{
-    static const uint8_t kQuadrantPos8[4] = {1U, 6U, 1U, 6U};
-
-    if (quadrant > TOF_QUADRANT_BOTTOM_RIGHT)
-    {
-        return 0U;
-    }
-
-    return kQuadrantPos8[quadrant];
-}
-
-int ToF_FindQuadrant(const uint16_t dist_mm[64],
-                     uint8_t *out_quadrant,
-                     uint16_t *out_min_mm)
-{
-    uint16_t quad_min[4] = {0xFFFFU, 0xFFFFU, 0xFFFFU, 0xFFFFU};
-
-    if ((dist_mm == NULL) || (out_quadrant == NULL) || (out_min_mm == NULL))
-    {
-        return 0;
-    }
-
-    for (uint8_t row = 0; row < 8U; row++)
-    {
-        for (uint8_t col = 0; col < 8U; col++)
-        {
-            uint8_t i = (row * 8U) + col;
-            uint16_t d = dist_mm[i];
-            uint8_t quadrant = (row < 4U)
-                                 ? ((col < 4U) ? TOF_QUADRANT_TOP_LEFT : TOF_QUADRANT_TOP_RIGHT)
-                                 : ((col < 4U) ? TOF_QUADRANT_BOTTOM_LEFT : TOF_QUADRANT_BOTTOM_RIGHT);
-
-            if ((d > 0U) && (d < quad_min[quadrant]))
-            {
-                quad_min[quadrant] = d;
-            }
-        }
-    }
-
-    uint8_t best_quadrant = 0U;
-    uint16_t best_mm = 0xFFFFU;
-
-    for (uint8_t q = 0; q < 4U; q++)
-    {
-        if (quad_min[q] < best_mm)
-        {
-            best_mm = quad_min[q];
-            best_quadrant = q;
-        }
-    }
-
-    if (best_mm == 0xFFFFU)
-    {
-        return 0;
-    }
-
-    *out_quadrant = best_quadrant;
-    *out_min_mm = best_mm;
-    return 1;
-}
-
 int ToF_FindNearestColumn8(const uint16_t dist_mm[64],
                            uint8_t *out_pos8,
                            uint16_t *out_min_mm)
@@ -224,7 +154,6 @@ int main(void)
   SpatialAudio_Start(&gAudio);
 
   uint16_t distance_mm_64[64] = {0};
-  uint8_t quadrant4;
   uint8_t pos8;
   uint16_t min_mm;
   /* USER CODE END 2 */
@@ -242,10 +171,8 @@ int main(void)
 
   if (TOF_GetDistanceMm64(distance_mm_64))
   {
-    if (ToF_FindQuadrant(distance_mm_64, &quadrant4, &min_mm))
+    if (ToF_FindNearestColumn8(distance_mm_64, &pos8, &min_mm))
     {
-      /* 0=lewa-gora, 1=prawa-gora, 2=lewa-dol, 3=prawa-dol */
-      pos8 = ToF_QuadrantToPos8(quadrant4);
       SpatialAudio_PostObservation(&gAudio, pos8, min_mm, 1);
     }
     else
@@ -320,6 +247,7 @@ static void MX_TIM2_Init(void)
 
   TIM_ClockConfigTypeDef sClockSourceConfig = {0};
   TIM_MasterConfigTypeDef sMasterConfig = {0};
+  TIM_OC_InitTypeDef sConfigOC = {0};
 
   /* USER CODE BEGIN TIM2_Init 1 */
 
@@ -339,15 +267,28 @@ static void MX_TIM2_Init(void)
   {
     Error_Handler();
   }
+  if (HAL_TIM_PWM_Init(&htim2) != HAL_OK)
+  {
+    Error_Handler();
+  }
   sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
   sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
   if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK)
   {
     Error_Handler();
   }
+  sConfigOC.OCMode = TIM_OCMODE_PWM1;
+  sConfigOC.Pulse = 0;
+  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+  if (HAL_TIM_PWM_ConfigChannel(&htim2, &sConfigOC, TIM_CHANNEL_3) != HAL_OK)
+  {
+    Error_Handler();
+  }
   /* USER CODE BEGIN TIM2_Init 2 */
 
   /* USER CODE END TIM2_Init 2 */
+  HAL_TIM_MspPostInit(&htim2);
 
 }
 
@@ -435,6 +376,9 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_7, GPIO_PIN_SET);
 
   /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(BUZZER_GPIO_Port, BUZZER_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_SET);
 
   /*Configure GPIO pin : PA4 */
@@ -443,8 +387,8 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : LD2_Pin PA7 */
-  GPIO_InitStruct.Pin = LD2_Pin|GPIO_PIN_7;
+  /*Configure GPIO pins : LD2_Pin PA7 BUZZER_Pin */
+  GPIO_InitStruct.Pin = LD2_Pin|GPIO_PIN_7|BUZZER_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;

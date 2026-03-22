@@ -12,6 +12,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 #include "vl53l8cx_api.h"
 #include "vl53l8cx_buffers.h"
 
@@ -244,6 +245,7 @@ uint8_t vl53l8cx_init(
 		VL53L8CX_Configuration		*p_dev)
 {
 	uint8_t tmp, status = VL53L8CX_STATUS_OK;
+	const char *stage = "start";
 	uint8_t pipe_ctrl[] = {VL53L8CX_NB_TARGET_PER_ZONE, 0x00, 0x01, 0x00};
 	uint32_t single_range = 0x01;
 	uint32_t crc_checksum = 0x00;
@@ -276,12 +278,14 @@ uint8_t vl53l8cx_init(
 	status |= VL53L8CX_WaitMs(&(p_dev->platform), 100);
 
 	/* Wait for sensor booted (several ms required to get sensor ready ) */
+	stage = "wait_sensor_boot";
 	status |= VL53L8CX_WrByte(&(p_dev->platform), 0x7fff, 0x00);
 	status |= _vl53l8cx_poll_for_answer(p_dev, 1, 0, 0x06, 0xff, 1);
 	if(status != (uint8_t)0){
 		goto exit;
 	}
 
+	stage = "enable_fw_access";
 	status |= VL53L8CX_WrByte(&(p_dev->platform), 0x000E, 0x01);
 	status |= VL53L8CX_WrByte(&(p_dev->platform), 0x7fff, 0x02);
 
@@ -289,6 +293,9 @@ uint8_t vl53l8cx_init(
 	status |= VL53L8CX_WrByte(&(p_dev->platform), 0x7fff, 0x01);
 	status |= VL53L8CX_WrByte(&(p_dev->platform), 0x06, 0x01);
 	status |= _vl53l8cx_poll_for_answer(p_dev, 1, 0, 0x21, 0xFF, 0x4);
+	if(status != (uint8_t)0){
+		goto exit;
+	}
 
 	status |= VL53L8CX_WrByte(&(p_dev->platform), 0x7fff, 0x00);
 
@@ -319,6 +326,7 @@ uint8_t vl53l8cx_init(
 	status |= VL53L8CX_WrByte(&(p_dev->platform), 0x7fff, 0x01);
 
 	/* Download FW into VL53L8CX */
+	stage = "download_fw";
 	status |= VL53L8CX_WrByte(&(p_dev->platform), 0x7fff, 0x09);
 	status |= VL53L8CX_WrMulti(&(p_dev->platform),0,
 		(uint8_t*)&VL53L8CX_FIRMWARE[0],0x8000);
@@ -329,8 +337,12 @@ uint8_t vl53l8cx_init(
 	status |= VL53L8CX_WrMulti(&(p_dev->platform),0,
 		(uint8_t*)&VL53L8CX_FIRMWARE[0x10000],0x5000);
 	status |= VL53L8CX_WrByte(&(p_dev->platform), 0x7fff, 0x01);
+	if(status != (uint8_t)0){
+		goto exit;
+	}
 
 	/* Check if FW correctly downloaded */
+	stage = "check_fw_download";
 	status |= VL53L8CX_WrByte(&(p_dev->platform), 0x7fff, 0x01);
 	status |= VL53L8CX_WrByte(&(p_dev->platform), 0x06, 0x03);
 
@@ -350,6 +362,7 @@ uint8_t vl53l8cx_init(
 	status |= VL53L8CX_WrByte(&(p_dev->platform), 0x0C, 0x00);
 	status |= VL53L8CX_WrByte(&(p_dev->platform), 0x0B, 0x01);
 
+	stage = "wait_mcu_boot";
 	status |= _vl53l8cx_poll_for_mcu_boot(p_dev);
 	if(status != (uint8_t)0){
 		goto exit;
@@ -358,6 +371,7 @@ uint8_t vl53l8cx_init(
 	status |= VL53L8CX_WrByte(&(p_dev->platform), 0x7fff, 0x02);
 
 	/* Firmware checksum */
+	stage = "fw_checksum";
 	status |= VL53L8CX_RdMulti(&(p_dev->platform), (uint16_t)(0x812FFC & 0xFFFF),
 			p_dev->temp_buffer, 4);
 	VL53L8CX_SwapBuffer(p_dev->temp_buffer, 4);
@@ -369,6 +383,7 @@ uint8_t vl53l8cx_init(
 	}
 
 	/* Get offset NVM data and store them into the offset buffer */
+	stage = "get_nvm";
 	status |= VL53L8CX_WrMulti(&(p_dev->platform), 0x2fd8,
 		(uint8_t*)VL53L8CX_GET_NVM_CMD, sizeof(VL53L8CX_GET_NVM_CMD));
 	status |= _vl53l8cx_poll_for_answer(p_dev, 4, 0,
@@ -377,20 +392,24 @@ uint8_t vl53l8cx_init(
 		p_dev->temp_buffer, VL53L8CX_NVM_DATA_SIZE);
 	(void)memcpy(p_dev->offset_data, p_dev->temp_buffer,
 		VL53L8CX_OFFSET_BUFFER_SIZE);
+	stage = "send_offset";
 	status |= _vl53l8cx_send_offset_data(p_dev, VL53L8CX_RESOLUTION_4X4);
 
 	/* Set default Xtalk shape. Send Xtalk to sensor */
 	(void)memcpy(p_dev->xtalk_data, (uint8_t*)VL53L8CX_DEFAULT_XTALK,
 		VL53L8CX_XTALK_BUFFER_SIZE);
+	stage = "send_xtalk";
 	status |= _vl53l8cx_send_xtalk_data(p_dev, VL53L8CX_RESOLUTION_4X4);
 
 	/* Send default configuration to VL53L8CX firmware */
+	stage = "default_configuration";
 	status |= VL53L8CX_WrMulti(&(p_dev->platform), 0x2c34,
 		p_dev->default_configuration,
 		sizeof(VL53L8CX_DEFAULT_CONFIGURATION));
 	status |= _vl53l8cx_poll_for_answer(p_dev, 4, 1,
 		VL53L8CX_UI_CMD_STATUS, 0xff, 0x03);
 
+	stage = "pipe_control";
 	status |= vl53l8cx_dci_write_data(p_dev, (uint8_t*)&pipe_ctrl,
 		VL53L8CX_DCI_PIPE_CONTROL, (uint16_t)sizeof(pipe_ctrl));
 #if VL53L8CX_NB_TARGET_PER_ZONE != 1
@@ -400,11 +419,18 @@ uint8_t vl53l8cx_init(
 	(uint8_t*)&tmp, 1, 0x0C);
 #endif
 
+	stage = "single_range";
 	status |= vl53l8cx_dci_write_data(p_dev, (uint8_t*)&single_range,
 			VL53L8CX_DCI_SINGLE_RANGE,
 			(uint16_t)sizeof(single_range));
 
 exit:
+	if(status != (uint8_t)0)
+	{
+		printf("VL53L8CX init debug: stage=%s status=0x%02X\r\n",
+		       stage,
+		       status);
+	}
 	return status;
 }
 

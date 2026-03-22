@@ -1,0 +1,3 @@
+C:/Users/JanRybarz/Desktop/hackaton/qubizm/build_codex/CMakeFiles/CMakeScratch/TryCompile-kf3jml/CMakeFiles/cmTC_99392.dir
+C:/Users/JanRybarz/Desktop/hackaton/qubizm/build_codex/CMakeFiles/CMakeScratch/TryCompile-kf3jml/CMakeFiles/edit_cache.dir
+C:/Users/JanRybarz/Desktop/hackaton/qubizm/build_codex/CMakeFiles/CMakeScratch/TryCompile-kf3jml/CMakeFiles/rebuild_cache.dir
