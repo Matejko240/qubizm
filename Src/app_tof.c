@@ -1,20 +1,7 @@
 /**
   ******************************************************************************
-  * @file          : app_tof.c
-  * @author        : IMG SW Application Team
-  * @brief         : This file provides code for the configuration
-  *                  of the STMicroelectronics.X-CUBE-TOF1.3.4.3 instances.
-  ******************************************************************************
-  *
-  * @attention
-  *
-  * Copyright (c) 2023 STMicroelectronics.
-  * All rights reserved.
-  *
-  * This software is licensed under terms that can be found in the LICENSE file
-  * in the root directory of this software component.
-  * If no LICENSE file comes with this software, it is provided AS-IS.
-  *
+  * @file    app_tof.c
+  * @brief   Simple VL53L8A1 grouped-column averaging app.
   ******************************************************************************
   */
 
@@ -22,14 +9,14 @@
 extern "C" {
 #endif
 
-/* Includes ------------------------------------------------------------------*/
 #include "app_tof.h"
-#include "main.h"
+
 #include <stdio.h>
 #include <string.h>
 
 #include "53l8a1_ranging_sensor.h"
 #include "app_tof_pin_conf.h"
+#include "main.h"
 #include "stm32l4xx_nucleo.h"
 #include "stm32l4xx_nucleo_bus.h"
 
@@ -39,11 +26,6 @@ extern "C" {
 #define TIMING_BUDGET (30U) /* 5 ms < TimingBudget < 100 ms */
 #define RANGING_FREQUENCY (10U) /* Ranging frequency Hz (shall be consistent with TimingBudget value) */
 #define TOF_DISTANCE_MM_64_SIZE (64U)
-#define TOF_INIT_RETRY_PERIOD_MS (1000U)
-#define TOF_PWR_OFF_MS (10U)
-#define TOF_PWR_ON_STABILIZE_MS (10U)
-#define TOF_LPN_LOW_MS (10U)
-#define TOF_BOOT_WAIT_MS (100U)
 
 /* Private variables ---------------------------------------------------------*/
 static RANGING_SENSOR_Capabilities_t Cap;
@@ -55,14 +37,10 @@ volatile uint8_t ToF_EventDetected = 0;
 static uint16_t g_distance_mm_64[TOF_DISTANCE_MM_64_SIZE];
 static volatile uint8_t g_distance_mm_64_fresh = 0U;
 static uint8_t g_tof_started = 0U;
-static uint32_t g_tof_last_init_attempt_tick = 0U;
 
 /* Private function prototypes -----------------------------------------------*/
-static uint8_t MX_53L8A1_SimpleRanging_Init(void);
+static void MX_53L8A1_SimpleRanging_Init(void);
 static void MX_53L8A1_SimpleRanging_Process(void);
-static void TOF_ResetCenterSensor(void);
-static void TOF_LogInitDiagnostics(void);
-static void TOF_PublishNoTargetFrame(void);
 static void TOF_UpdateDistanceMm64(const RANGING_SENSOR_Result_t *result);
 static void __attribute__((unused)) print_result(RANGING_SENSOR_Result_t *Result);
 static void toggle_resolution(void);
@@ -84,13 +62,10 @@ void MX_TOF_Init(void)
   /* USER CODE END TOF_Init_PreTreatment */
 
   /* Initialize the peripherals and the TOF components */
-  BSP_COM_Init(COM1);
-  BSP_PB_Init(BUTTON_KEY, BUTTON_MODE_EXTI);
 
   memset(g_distance_mm_64, 0, sizeof(g_distance_mm_64));
   g_distance_mm_64_fresh = 0U;
   g_tof_started = 0U;
-  g_tof_last_init_attempt_tick = 0U;
   MX_53L8A1_SimpleRanging_Init();
 
   /* USER CODE BEGIN TOF_Init_PostTreatment */
@@ -103,87 +78,93 @@ void MX_TOF_Init(void)
  */
 void MX_TOF_Process(void)
 {
-  /* USER CODE BEGIN TOF_Process_PreTreatment */
+  if (g_ready == 0U)
+  {
+    return;
+  }
 
-  /* USER CODE END TOF_Process_PreTreatment */
+  if (g_reset_requested != 0U)
+  {
+    g_reset_requested = 0U;
+    reset_group_window();
+  }
 
-  MX_53L8A1_SimpleRanging_Process();
+  if ((HAL_GetTick() - g_last_sample_ms) < TOF_UPDATE_PERIOD_MS)
+  {
+    return;
+  }
 
-  /* USER CODE BEGIN TOF_Process_PostTreatment */
-
-  /* USER CODE END TOF_Process_PostTreatment */
+  g_last_sample_ms = HAL_GetTick();
+  sample_and_stream();
 }
 
-uint8_t TOF_GetDistanceMm64(uint16_t out_distance_mm_64[64])
+static void MX_53L8A1_SimpleRanging_Init(void)
 {
-  uint8_t has_fresh_frame;
+  uint32_t Id;
 
-  if (out_distance_mm_64 == NULL)
+  /* Initialize Virtual COM Port */
+  BSP_COM_Init(COM1);
+
+  /* Initialize button */
+  BSP_PB_Init(BUTTON_KEY, BUTTON_MODE_EXTI);
+
+  /* Sensor reset */
+  HAL_GPIO_WritePin(VL53L8A1_PWR_EN_C_PORT, VL53L8A1_PWR_EN_C_PIN, GPIO_PIN_RESET);
+  HAL_Delay(2);
+  HAL_GPIO_WritePin(VL53L8A1_PWR_EN_C_PORT, VL53L8A1_PWR_EN_C_PIN, GPIO_PIN_SET);
+  HAL_Delay(2);
+  HAL_GPIO_WritePin(VL53L8A1_LPn_C_PORT, VL53L8A1_LPn_C_PIN, GPIO_PIN_RESET);
+  HAL_Delay(2);
+  HAL_GPIO_WritePin(VL53L8A1_LPn_C_PORT, VL53L8A1_LPn_C_PIN, GPIO_PIN_SET);
+  HAL_Delay(2);
+
+  printf("\033[2H\033[2J");
+  printf("53L8A1 Simple Ranging demo application\n");
+  printf("Sensor initialization...\n");
+
+  status = VL53L8A1_RANGING_SENSOR_Init(VL53L8A1_DEV_CENTER);
+
+  if (status != BSP_ERROR_NONE)
   {
-    return 0U;
+    printf("VL53L8A1_RANGING_SENSOR_Init failed\n");
+    while (1);
   }
 
-  has_fresh_frame = g_distance_mm_64_fresh;
-  if (has_fresh_frame == 0U)
+  VL53L8A1_RANGING_SENSOR_ReadID(VL53L8A1_DEV_CENTER, &Id);
+  VL53L8A1_RANGING_SENSOR_GetCapabilities(VL53L8A1_DEV_CENTER, &Cap);
+
+  Profile.RangingProfile = RS_PROFILE_8x8_CONTINUOUS;
+  Profile.TimingBudget = TIMING_BUDGET;
+  Profile.Frequency = RANGING_FREQUENCY;
+  Profile.EnableAmbient = 0U;
+  Profile.EnableSignal = 0U;
+
+  if (VL53L8A1_RANGING_SENSOR_ConfigProfile(VL53L8A1_DEV_CENTER, &g_tof_profile) != BSP_ERROR_NONE)
   {
-    return 0U;
+    printf("VL53L8A1_RANGING_SENSOR_ConfigProfile failed\n");
+    while (1);
   }
 
-  memcpy(out_distance_mm_64, g_distance_mm_64, sizeof(g_distance_mm_64));
-  g_distance_mm_64_fresh = 0U;
+  if (VL53L8A1_RANGING_SENSOR_Start(VL53L8A1_DEV_CENTER, RS_MODE_BLOCKING_CONTINUOUS) != BSP_ERROR_NONE)
+  {
+    printf("VL53L8A1_RANGING_SENSOR_Start failed\n");
+    while (1);
+  }
 
-  return 1U;
+  g_tof_started = 1U;
 }
 
 static void MX_53L8A1_SimpleRanging_Process(void)
 {
-  uint32_t now;
-  uint8_t tof_data_ready;
-
   if (g_tof_started == 0U)
   {
-    now = HAL_GetTick();
-    if ((now - g_tof_last_init_attempt_tick) >= TOF_INIT_RETRY_PERIOD_MS)
-    {
-      MX_53L8A1_SimpleRanging_Init();
-    }
     return;
   }
 
-  tof_data_ready = 0U;
-  if (ToF_EventDetected != 0U)
-  {
-    tof_data_ready = 1U;
-  }
-  else if (HAL_GPIO_ReadPin(TOF_INT_EXTI_PORT, TOF_INT_EXTI_PIN) == GPIO_PIN_RESET)
-  {
-    /* INT is active low. Read once even if the EXTI edge was missed. */
-    tof_data_ready = 1U;
-  }
-
-  if (tof_data_ready == 0U)
-  {
-    if (com_has_data())
-    {
-      handle_cmd(get_key());
-    }
-    return;
-  }
-
-  ToF_EventDetected = 0U;
   status = VL53L8A1_RANGING_SENSOR_GetDistance(VL53L8A1_DEV_CENTER, &Result);
   if (status == BSP_ERROR_NONE)
   {
     TOF_UpdateDistanceMm64(&Result);
-  }
-  else
-  {
-    g_tof_started = 0U;
-    TOF_PublishNoTargetFrame();
-    printf("TOF communication lost, retrying init in %lu ms (status=%ld)\r\n",
-           (unsigned long)TOF_INIT_RETRY_PERIOD_MS,
-           (long)status);
-    return;
   }
 
   if (com_has_data())
@@ -192,167 +173,50 @@ static void MX_53L8A1_SimpleRanging_Process(void)
   }
 }
 
-static uint8_t MX_53L8A1_SimpleRanging_Init(void)
+static void sample_and_stream(void)
 {
-  uint32_t Id;
-
-  g_tof_last_init_attempt_tick = HAL_GetTick();
-  g_tof_started = 0U;
-
-  TOF_ResetCenterSensor();
-  TOF_LogInitDiagnostics();
-
-  printf("\r\n");
-  printf("53L8A1 Simple Ranging demo application\r\n");
-  printf("Sensor initialization...\r\n");
-
-  status = VL53L8A1_RANGING_SENSOR_Init(VL53L8A1_DEV_CENTER);
-  if (status != BSP_ERROR_NONE)
-  {
-    TOF_PublishNoTargetFrame();
-    printf("VL53L8A1_RANGING_SENSOR_Init failed, retry in %lu ms (status=%ld)\r\n",
-           (unsigned long)TOF_INIT_RETRY_PERIOD_MS,
-           (long)status);
-    return 0U;
-  }
-
-  status = VL53L8A1_RANGING_SENSOR_ReadID(VL53L8A1_DEV_CENTER, &Id);
-  if (status != BSP_ERROR_NONE)
-  {
-    TOF_PublishNoTargetFrame();
-    printf("VL53L8A1_RANGING_SENSOR_ReadID failed, retry in %lu ms (status=%ld)\r\n",
-           (unsigned long)TOF_INIT_RETRY_PERIOD_MS,
-           (long)status);
-    return 0U;
-  }
-
-  status = VL53L8A1_RANGING_SENSOR_GetCapabilities(VL53L8A1_DEV_CENTER, &Cap);
-  if (status != BSP_ERROR_NONE)
-  {
-    TOF_PublishNoTargetFrame();
-    printf("VL53L8A1_RANGING_SENSOR_GetCapabilities failed, retry in %lu ms (status=%ld)\r\n",
-           (unsigned long)TOF_INIT_RETRY_PERIOD_MS,
-           (long)status);
-    return 0U;
-  }
-
-  Profile.RangingProfile = RS_PROFILE_8x8_CONTINUOUS;
-  Profile.TimingBudget = TIMING_BUDGET;
-  Profile.Frequency = RANGING_FREQUENCY;
-  Profile.EnableAmbient = 0U;
-  Profile.EnableSignal = 0U;
-
-  status = VL53L8A1_RANGING_SENSOR_ConfigProfile(VL53L8A1_DEV_CENTER, &Profile);
-  if (status != BSP_ERROR_NONE)
-  {
-    TOF_PublishNoTargetFrame();
-    printf("VL53L8A1_RANGING_SENSOR_ConfigProfile failed, retry in %lu ms (status=%ld)\r\n",
-           (unsigned long)TOF_INIT_RETRY_PERIOD_MS,
-           (long)status);
-    return 0U;
-  }
-
-  status = VL53L8A1_RANGING_SENSOR_Start(VL53L8A1_DEV_CENTER, RS_MODE_ASYNC_CONTINUOUS);
-  if (status != BSP_ERROR_NONE)
-  {
-    TOF_PublishNoTargetFrame();
-    printf("VL53L8A1_RANGING_SENSOR_Start failed, retry in %lu ms (status=%ld)\r\n",
-           (unsigned long)TOF_INIT_RETRY_PERIOD_MS,
-           (long)status);
-    return 0U;
-  }
-
-  ToF_EventDetected = 0U;
-  g_tof_started = 1U;
-  printf("TOF ready, sensor ID=0x%lX\r\n", (unsigned long)Id);
-  return 1U;
+  tof_sample_t sample;
+  collect_sample(&sample);
+  update_group_average_and_print(&sample);
 }
 
-static void TOF_ResetCenterSensor(void)
+static void update_group_average_and_print(const tof_sample_t *sample)
 {
-  /* Power-cycle the built-in sensor before each init attempt. */
-  HAL_GPIO_WritePin(VL53L8A1_PWR_EN_C_PORT, VL53L8A1_PWR_EN_C_PIN, GPIO_PIN_RESET);
-  HAL_Delay(TOF_PWR_OFF_MS);
-  HAL_GPIO_WritePin(VL53L8A1_PWR_EN_C_PORT, VL53L8A1_PWR_EN_C_PIN, GPIO_PIN_SET);
-  HAL_Delay(TOF_PWR_ON_STABILIZE_MS);
-  HAL_GPIO_WritePin(VL53L8A1_LPn_C_PORT, VL53L8A1_LPn_C_PIN, GPIO_PIN_RESET);
-  HAL_Delay(TOF_LPN_LOW_MS);
-  HAL_GPIO_WritePin(VL53L8A1_LPn_C_PORT, VL53L8A1_LPn_C_PIN, GPIO_PIN_SET);
-  HAL_Delay(TOF_BOOT_WAIT_MS);
-}
+  uint16_t grouped_cm[GROUP_COUNT];
+  uint32_t group;
 
-static void TOF_LogInitDiagnostics(void)
-{
-  uint8_t page;
-  uint8_t device_id;
-  uint8_t revision_id;
-  int32_t bus_status;
-  int32_t ready_status;
-  int32_t wr_status;
-  int32_t rd0_status;
-  int32_t rd1_status;
-
-  page = 0U;
-  device_id = 0U;
-  revision_id = 0U;
-
-  bus_status = BSP_I2C1_Init();
-  ready_status = BSP_I2C1_IsReady(RANGING_SENSOR_VL53L8CX_ADDRESS, 2U);
-  wr_status = BSP_I2C1_WriteReg16(RANGING_SENSOR_VL53L8CX_ADDRESS, 0x7FFFU, &page, 1U);
-  rd0_status = BSP_I2C1_ReadReg16(RANGING_SENSOR_VL53L8CX_ADDRESS, 0x0000U, &device_id, 1U);
-  rd1_status = BSP_I2C1_ReadReg16(RANGING_SENSOR_VL53L8CX_ADDRESS, 0x0001U, &revision_id, 1U);
-
-  printf("TOF diag: PWR_EN=%u LPn=%u INT=%u I2C_init=%ld ready=%ld wr7FFF=%ld rd0=%ld rd1=%ld HAL_I2C=0x%08lX ID=0x%02X REV=0x%02X\r\n",
-         (unsigned int)HAL_GPIO_ReadPin(VL53L8A1_PWR_EN_C_PORT, VL53L8A1_PWR_EN_C_PIN),
-         (unsigned int)HAL_GPIO_ReadPin(VL53L8A1_LPn_C_PORT, VL53L8A1_LPn_C_PIN),
-         (unsigned int)HAL_GPIO_ReadPin(TOF_INT_EXTI_PORT, TOF_INT_EXTI_PIN),
-         (long)bus_status,
-         (long)ready_status,
-         (long)wr_status,
-         (long)rd0_status,
-         (long)rd1_status,
-         (unsigned long)HAL_I2C_GetError(&hi2c1),
-         (unsigned int)device_id,
-         (unsigned int)revision_id);
-}
-
-static void TOF_PublishNoTargetFrame(void)
-{
-  memset(g_distance_mm_64, 0, sizeof(g_distance_mm_64));
-  g_distance_mm_64_fresh = 1U;
-}
-
-static void TOF_UpdateDistanceMm64(const RANGING_SENSOR_Result_t *result)
-{
-  uint32_t zone_index;
-  uint8_t zones_per_line;
-
-  memset(g_distance_mm_64, 0, sizeof(g_distance_mm_64));
-
-  if (result == NULL)
+  if (sample == NULL)
   {
-    g_distance_mm_64_fresh = 1U;
     return;
   }
 
-  zones_per_line = (result->NumberOfZones >= TOF_DISTANCE_MM_64_SIZE) ? 8U : 4U;
-
-  for (zone_index = 0U; zone_index < result->NumberOfZones; zone_index++)
+  for (group = 0U; group < GROUP_COUNT; group++)
   {
-    uint16_t distance_mm = 0U;
-    uint32_t raw_row = zone_index / zones_per_line;
-    uint32_t raw_col = zone_index % zones_per_line;
-    uint32_t col = (zones_per_line - 1U) - raw_col;
+    uint32_t frame_sum_mm = 0U;
+    uint32_t frame_count = 0U;
+    uint32_t row;
+    uint32_t col;
+    uint32_t window_sum_mm = 0U;
+    uint32_t window_count = 0U;
 
-    if ((result->ZoneResult[zone_index].NumberOfTargets > 0U) &&
-        (result->ZoneResult[zone_index].Status[0] == 0U))
+    for (row = 0U; row < TOF_MATRIX_SIZE; row++)
     {
-      distance_mm = (uint16_t)result->ZoneResult[zone_index].Distance[0];
+      for (col = 0U; col < GROUP_WIDTH; col++)
+      {
+        const uint32_t matrix_col = (group * GROUP_WIDTH) + col;
+        const int32_t dist_mm = sample->tof_dist_mm[(row * TOF_MATRIX_SIZE) + matrix_col];
+        if ((dist_mm >= MIN_VALID_DISTANCE_MM) && (dist_mm <= MAX_VALID_DISTANCE_MM))
+        {
+          frame_sum_mm += (uint32_t)dist_mm;
+          frame_count++;
+        }
+      }
     }
 
-    if (zones_per_line == 8U)
+    if (frame_count > 0U)
     {
-      g_distance_mm_64[(raw_row * 8U) + col] = distance_mm;
+      g_group_window_mm[group][g_window_head] = (uint16_t)((frame_sum_mm + (frame_count / 2U)) / frame_count);
+      g_group_window_valid[group][g_window_head] = 1U;
     }
     else
     {
@@ -460,11 +324,6 @@ static void __attribute__((unused)) print_result(RANGING_SENSOR_Result_t *Result
 
 static void toggle_resolution(void)
 {
-  if (g_tof_started == 0U)
-  {
-    return;
-  }
-
   VL53L8A1_RANGING_SENSOR_Stop(VL53L8A1_DEV_CENTER);
 
   switch (Profile.RangingProfile)
@@ -495,11 +354,6 @@ static void toggle_resolution(void)
 
 static void toggle_signal_and_ambient(void)
 {
-  if (g_tof_started == 0U)
-  {
-    return;
-  }
-
   VL53L8A1_RANGING_SENSOR_Stop(VL53L8A1_DEV_CENTER);
 
   Profile.EnableAmbient = (Profile.EnableAmbient) ? 0U : 1U;
@@ -511,20 +365,22 @@ static void toggle_signal_and_ambient(void)
 
 static void clear_screen(void)
 {
-  printf("\r\n");
+  printf("%c[2J", 27); /* 27 is ESC command */
 }
 
 static void display_commands_banner(void)
 {
-  printf("\r\n");
-  printf("53L8A1 Simple Ranging demo application\r\n");
-  printf("--------------------------------------\r\n\r\n");
+  /* clear screen */
+  printf("%c[2H", 27);
 
-  printf("Use the following keys to control application\r\n");
-  printf(" 'r' : change resolution\r\n");
-  printf(" 's' : enable signal and ambient\r\n");
-  printf(" 'c' : print a separator line\r\n");
-  printf("\r\n");
+  printf("53L8A1 Simple Ranging demo application\n");
+  printf("--------------------------------------\n\n");
+
+  printf("Use the following keys to control application\n");
+  printf(" 'r' : change resolution\n");
+  printf(" 's' : enable signal and ambient\n");
+  printf(" 'c' : clear screen\n");
+  printf("\n");
 }
 
 static void handle_cmd(uint8_t cmd)
@@ -566,7 +422,21 @@ static uint32_t com_has_data(void)
 
 void BSP_PB_Callback(Button_TypeDef Button)
 {
-  PushButtonDetected = 1;
+  uint32_t now;
+
+  if (Button != BUTTON_KEY)
+  {
+    return;
+  }
+
+  now = HAL_GetTick();
+  if ((now - g_last_button_press_ms) < 250U)
+  {
+    return;
+  }
+
+  g_last_button_press_ms = now;
+  g_reset_requested = 1U;
 }
 
 #ifdef __cplusplus
